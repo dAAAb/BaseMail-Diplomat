@@ -10,7 +10,7 @@ Built for the [Chainlink Convergence Hackathon](https://chain.link/hackathon) �
 
 ## Demo
 
-📹 [Watch the 3-minute demo video](https://youtu.be/TODO)
+📹 [Watch the 3-minute demo video](https://youtu.be/7WxNClYn0v4)
 
 ## How It Works
 
