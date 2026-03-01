@@ -156,6 +156,8 @@ basemail-diplomat/
 
 **DiplomatAttestation.sol** — Records every email arbitration decision on-chain.
 
+📍 **Base Sepolia**: [`0x3445dfD122F98A0048AC6A065d82E11945E6F65D`](https://sepolia.basescan.org/address/0x3445dfd122f98a0048ac6a065d82e11945e6f65d) (verified ✅)
+
 ```solidity
 function attest(
     bytes32 emailHash,        // Unique email identifier
