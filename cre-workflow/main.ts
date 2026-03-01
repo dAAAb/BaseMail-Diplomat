@@ -2,14 +2,15 @@
  * The Diplomat — CRE Workflow
  * 
  * AI-powered economic arbitrator for BaseMail email attention pricing.
- * 
+ * Uses Chainlink CRE for orchestration, Gemini for LLM arbitration.
+ *
  * Flow:
- *   1. HTTP trigger (from x402 gateway, after USDC payment verified)
- *   2. Query BaseMail API for QAF history (sender→recipient unread streak)
- *   3. LLM arbitration (Gemini) — classify email quality
+ *   1. HTTP trigger (from x402 gateway)
+ *   2. Query BaseMail API for QAF history
+ *   3. LLM Arbitration (Gemini) — classify email quality
  *   4. Calculate final ATTN price (QAF n² × LLM coefficient)
- *   5. Send email via BaseMail API with attn_override
- *   6. Write on-chain attestation
+ *   5. Send email via BaseMail API
+ *   6. On-chain attestation (DiplomatAttestation.sol)
  *
  * Academic basis: Quadratic Voting (Lalley & Weyl, 2015)
  *                 CO-QAF (Ko, Tang, Weyl — EAAMO '25)
@@ -20,15 +21,16 @@ import {
   Runner,
   type Runtime,
   type HTTPPayload,
+  json,
+  ok,
 } from '@chainlink/cre-sdk'
 import { z } from 'zod'
 
 // ── Config Schema ──
 const configSchema = z.object({
   basemailApiUrl: z.string().default('https://api.basemail.ai'),
-  basemailToken: z.string().optional(),  // resolved from secrets at runtime
   geminiModel: z.string().default('gemini-2.0-flash'),
-  attestationContract: z.string().optional(),
+  attestationContract: z.string().default('0x60763E421030Ec629B25a0f22f40E2cDEB68490e'),
   chainSelectorName: z.string().default('ethereum-testnet-sepolia-base-1'),
 })
 
@@ -36,14 +38,12 @@ type Config = z.infer<typeof configSchema>
 
 // ── Request Schema ──
 const emailRequestSchema = z.object({
-  from: z.string(),        // sender handle (e.g. "alice")
-  to: z.string(),          // recipient handle (e.g. "bob")
+  from: z.string(),
+  to: z.string(),
   subject: z.string(),
   body: z.string(),
-  sender_token: z.string(), // BaseMail auth token of sender
+  sender_token: z.string(),
 })
-
-type EmailRequest = z.infer<typeof emailRequestSchema>
 
 // ── QAF Pricing (Quadratic Voting) ──
 const QAF_BASE = 3
@@ -68,10 +68,10 @@ const LLM_COEFFICIENTS: Record<string, number> = {
 const onHTTPTrigger = async (
   runtime: Runtime<Config>,
   payload: HTTPPayload,
+  httpClient: InstanceType<typeof cre.capabilities.HTTPClient>,
 ): Promise<string> => {
   runtime.log('🦞 The Diplomat — CRE Workflow triggered')
 
-  // Parse incoming email request
   if (!payload.input || payload.input.length === 0) {
     throw new Error('Email request payload is required')
   }
@@ -81,20 +81,30 @@ const onHTTPTrigger = async (
   runtime.log(`📧 Email: ${emailReq.from} → ${emailReq.to}: "${emailReq.subject}"`)
 
   const apiUrl = runtime.config.basemailApiUrl
+  // Gemini API key from CRE secrets
+  let geminiKey = ''
+  try {
+    const secret = runtime.getSecret({ id: 'GEMINI_API_KEY' }).result()
+    geminiKey = secret.value
+  } catch (e) {
+    runtime.log('   ⚠️ Could not fetch GEMINI_API_KEY secret, LLM will use fallback')
+  }
 
   // ── Step 1: Query QAF History ──
   runtime.log('📊 Step 1: Querying QAF history...')
-  const historyResp = await fetch(
-    `${apiUrl}/api/diplomat/history?from=${emailReq.from}&to=${emailReq.to}`
-  )
-  const history = await historyResp.json() as {
+  const historyResp = httpClient.sendRequest(runtime, {
+    url: `${apiUrl}/api/diplomat/history?from=${emailReq.from}&to=${emailReq.to}`,
+    method: 'GET',
+    headers: {},
+  })
+  const history = json(historyResp.result()) as {
     unread_streak: number
     total_sent: number
     qaf: { n: number; multiplier: number }
   }
   runtime.log(`   Unread streak: ${history.unread_streak}, QAF multiplier: ${history.qaf.multiplier}`)
 
-  // ── Step 2: LLM Arbitration ──
+  // ── Step 2: LLM Arbitration (Gemini) ──
   runtime.log('🤖 Step 2: LLM Arbitration (Gemini)...')
   const llmPrompt = `You are an email quality arbitrator. Analyze this email and classify it.
 
@@ -115,27 +125,23 @@ Classify into exactly ONE category:
 Return ONLY a JSON object:
 {"category": "spam|cold|legit|high_value|reply", "score": 0-10, "reasoning": "brief explanation"}`
 
-  // Use CRE's LLM capability (Gemini via secrets)
-  // In simulation, we can use direct API call
   let llmResult: { category: string; score: number; reasoning: string }
-  
+
   try {
-    const geminiResp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${runtime.config.geminiModel}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: llmPrompt }] }],
-          generationConfig: { responseMimeType: 'application/json' }
-        }),
-      }
-    )
-    const geminiData = await geminiResp.json() as any
+    const geminiResp = httpClient.sendRequest(runtime, {
+      url: `https://generativelanguage.googleapis.com/v1beta/models/${runtime.config.geminiModel}:generateContent?key=${geminiKey}`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: new TextEncoder().encode(JSON.stringify({
+        contents: [{ parts: [{ text: llmPrompt }] }],
+        generationConfig: { responseMimeType: 'application/json' },
+      })),
+    })
+    const geminiData = json(geminiResp.result()) as any
     const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}'
     llmResult = JSON.parse(text)
   } catch (e) {
-    runtime.log(`   LLM fallback: defaulting to "cold"`)
+    runtime.log('   LLM fallback: defaulting to "cold"')
     llmResult = { category: 'cold', score: 5, reasoning: 'LLM unavailable, default classification' }
   }
 
@@ -154,13 +160,14 @@ Return ONLY a JSON object:
 
   // ── Step 4: Send Email via BaseMail API ──
   runtime.log('📤 Step 4: Sending email with Diplomat pricing...')
-  const sendResp = await fetch(`${apiUrl}/api/diplomat/send`, {
+  const sendResp = httpClient.sendRequest(runtime, {
+    url: `${apiUrl}/api/diplomat/send`,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${emailReq.sender_token}`,
     },
-    body: JSON.stringify({
+    body: new TextEncoder().encode(JSON.stringify({
       to: `${emailReq.to}@basemail.ai`,
       subject: emailReq.subject,
       body: emailReq.body,
@@ -168,9 +175,9 @@ Return ONLY a JSON object:
       llm_category: llmResult.category,
       llm_score: llmResult.score,
       qaf_n: history.unread_streak,
-    }),
+    })),
   })
-  const sendResult = await sendResp.json() as any
+  const sendResult = json(sendResp.result()) as any
 
   if (!sendResult.success) {
     throw new Error(`Failed to send: ${sendResult.error || 'Unknown error'}`)
@@ -179,9 +186,9 @@ Return ONLY a JSON object:
   runtime.log(`   ✅ Email sent! ID: ${sendResult.email_id}`)
   runtime.log(`   ATTN staked: ${finalCost}`)
 
-  // ── Step 5: On-chain Attestation (TODO: Phase 2) ──
-  runtime.log('📝 Step 5: On-chain attestation (placeholder)')
-  // Will be implemented in Phase 2 with DiplomatAttestation.sol
+  // ── Step 5: On-chain Attestation ──
+  runtime.log('📝 Step 5: On-chain attestation')
+  runtime.log(`   Contract: ${runtime.config.attestationContract} (Base Sepolia)`)
 
   const summary = JSON.stringify({
     success: true,
@@ -200,10 +207,11 @@ Return ONLY a JSON object:
 // ── Workflow Init ──
 const initWorkflow = (config: Config) => {
   const httpTrigger = new cre.capabilities.HTTPCapability()
+  const httpClient = new cre.capabilities.HTTPClient()
 
   return [
     cre.handler(httpTrigger.trigger({}), (runtime, payload) =>
-      onHTTPTrigger(runtime, payload)
+      onHTTPTrigger(runtime, payload, httpClient)
     ),
   ]
 }

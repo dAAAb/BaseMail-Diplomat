@@ -4,3 +4,4 @@ lib/
 .env
 *.key
 node_modules/
+.cre_build_tmp.*
