@@ -1,0 +1,17 @@
+{
+  "name": "cre-workflow",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.1.2",
+    "ethers": "^6.16.0",
+    "zod": "^3.25.76"
+  }
+}
