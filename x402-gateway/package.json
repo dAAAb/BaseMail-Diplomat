@@ -1,0 +1,16 @@
+{
+  "name": "basemail-diplomat-gateway",
+  "version": "0.1.0",
+  "description": "x402 Payment Gateway for The Diplomat CRE Workflow",
+  "scripts": {
+    "dev": "npx tsx server.ts",
+    "start": "npx tsx server.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "basemailApiUrl": "http://localhost:8787",
+  "geminiModel": "gemini-2.0-flash",
+  "chainSelectorName": "ethereum-testnet-sepolia-base-1"
+}
